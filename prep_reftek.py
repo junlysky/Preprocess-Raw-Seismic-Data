@@ -2,7 +2,7 @@ import os, sys, glob
 sys.path.append('/home/zhouyj/Documents/data_prep')
 import obspy
 from obspy import read, UTCDateTime
-import sac
+from obspy import Stream
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -20,64 +20,63 @@ sac_root = '/data/XJ_SAC/XLS'
 start_date = UTCDateTime(2016,1,1)
 end_date   = UTCDateTime(2017,1,1)
 net = 'XLS'
-chn_seq = ['HHZ','HHN','HHE']
 extension = '_006DDD00'
 
 # 1. reftek (raw dir) to sac (sac dir): r raw dir & w sac dir
+# merge all reftek files and write day-long sac files
 for raw_dir in raw_dirs:
     if not os.path.isdir(raw_dir): continue
     os.chdir(raw_dir)
-    date = UTCDateTime(raw_dir.split('/')[-3])
-    sta = raw_dir.split('/')[-2]
-    if date<start_date or date>end_date: continue
-    print('processing %s' %raw_dir)
+    print(raw_dir)
+
     rt_files = sorted(glob.glob('*%s'%extension))
+    st = Stream()
     for rt_file in rt_files:
-      print('read %s' %rt_file)
-      try: st = read(rt_file)
-      except: obspy.io.segy.segy.SEGYTraceReadingError; print('bad data!'); continue
-      if len(st)!=3: print('channel error!'); continue
-      for idx,tr in enumerate(st):
-        header = tr.stats
-        t0, t1 = header.starttime, header.endtime
-        # set out path
-        out_dir = os.path.join(sac_root, sta, date2dir(date))
-        if not os.path.exists(out_dir): os.makedirs(out_dir)
-        dtime = ''.join(date2dir(date).split('/')) + rt_file[0:2]
-        chn = chn_seq[idx]
-        out_name = '%s.%s.%s.sac'%(sta, dtime, chn)
-        out_path = os.path.join(out_dir, out_name)
-        tr.slice(date, date+86400).write(out_path)
-        if t0 < date:
-            tr0 = tr.slice(t0, date)
-            out_dir0 = os.path.join(sac_root, sta, date2dir(date-86400))
-            if not os.path.exists(out_dir0): os.makedirs(out_dir0)
-            out_name0 = 'aug0.' + out_name
-            out_path0 = os.path.join(out_dir0, out_name0)
-            tr0.write(out_path0)
-        if t1 > date+86400: 
-            tr1 = tr.slice(date+86400, t1)
-            out_dir1 = os.path.join(sac_root, sta, date2dir(date+86400))
-            if not os.path.exists(out_dir1): os.makedirs(out_dir1)
-            out_name1 = 'aug1.' + out_name
-            out_path1 = os.path.join(out_dir1, out_name1)
-            tr1.write(out_path1)
+        print('read %s' %rt_file)
+        try: 
+            st += read(rt_file)
+            st0 = read(rt_file)
+        except: obspy.io.segy.segy.SEGYTraceReadingError; print('bad data!'); continue
+        n_trace = len(st0)
+        if n_trace !=3: 
+             print('Warning: broken trace, the program is handing gaps and overlaps!')
+        # handing overlaps
+        # sort
+        st = st.sort(['starttime'])
+        st = st.merge(method=1,fill_value=0)
+    # write
+    sta    = st[0].stats.station
+    chn_z  = st[0].stats.channel
+    chn_n  = st[1].stats.channel
+    chn_e  = st[2].stats.channel
+    t0     = st[0].stats.starttime
+    t1     = st[-1].stats.endtime 
+    # set out path
+    nm1    = str(t0.year)+str(t0.month).zfill(2)+str(t0.day).zfill(2)
+    out_dir = os.path.join(sac_root, sta, date2dir(date)) 
+    if not os.path.exists(out_dir): os.makedirs(out_dir)
+    out_name1 = '%s.%s.%s.sac'%(sta, nm1, chn_z)
+    out_name2 = '%s.%s.%s.sac'%(sta, nm1, chn_n)
+    out_name3 = '%s.%s.%s.sac'%(sta, nm1, chn_e)
+    out_path1 = os.path.join(out_dir, out_name1)
+    out_path2 = os.path.join(out_dir, out_name2)
+    out_path3 = os.path.join(out_dir, out_name3)
 
+    st[0].slice(t0, t1).write(out_path1,format='sac')
+    st[1].slice(t0, t1).write(out_path2,format='sac')
+    st[2].slice(t0, t1).write(out_path3,format='sac')
+    
+'''
+Notes: 
+Stream.merge(method=1, fill_value=0, interpolation_samples=0)
 
-# 2. merge sac files in sac dir
-""" This can be done seperatly
-"""
-sac_dirs = sorted(glob.glob(os.path.join(sac_root, '*/*/*/*')))
-for sac_dir in sac_dirs:
-    print('merge sac files in %s' %sac_dir)
-    os.chdir(sac_dir)
-    codes = os.getcwd().split('/')
-    sta = codes[-4]
-    date = codes[-3] + codes[-2] + codes[-1]
-    sac.merge(glob.glob('*.%s.*'%chn_seq[0]), '%s.%s.%s.%s.SAC' %(net, sta, date, chn_seq[0]))
-    sac.merge(glob.glob('*.%s.*'%chn_seq[1]), '%s.%s.%s.%s.SAC' %(net, sta, date, chn_seq[1]))
-    sac.merge(glob.glob('*.%s.*'%chn_seq[2]), '%s.%s.%s.%s.SAC' %(net, sta, date, chn_seq[2]))
-    # delete sac segments
-    todel = glob.glob('*.sac')
-    for fname in todel: os.unlink(fname)
+1.Traces with gaps and given fill_value=0:
+Trace 1: AAAA
+Trace 2:         FFFF
+1 + 2  : AAAA0000FFFF
 
+2.Traces with overlaps ,discard data of the previous trace:
+Trace 1: AAAAAAAA
+Trace 2:     FFFFFFFF
+1 + 2  : AAAAFFFFFFFF
+'''
